@@ -110,7 +110,7 @@ void vKeyboardTask(void *pvParameters) {
 
 
 /*-----------------------------------------------------------*/
-/* --- 新增：游戏绘图任务 --- */
+/* --- 游戏绘图任务 --- */
 void vDrawTask(void *pvParameters) {
     (void)pvParameters;
     GameState_t localGameState; // 创建一个本地副本以减少锁的持有时间

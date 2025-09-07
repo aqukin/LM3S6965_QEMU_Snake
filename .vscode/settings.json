@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "sysctl.h": "c",
+        "osram128x64x4.h": "c",
+        "freertos.h": "c",
+        "freertosconfig.h": "c"
+    }
+}

@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "FreeRTOS GDB Debug",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "external",
+            "executable": "${workspaceFolder}/build/RTOSDemo.elf",
+            "cwd": "${workspaceFolder}",
+            "gdbPath": "arm-none-eabi-gdb",
+            "gdbTarget": "localhost:1234",
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "raw",
+            "device": "lm3s6965evb",
+            "cpu": "cortex-m3",
+            // "preLaunchTask": "Run QEMU"
+        }
+    ]
+}

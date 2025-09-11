@@ -232,7 +232,7 @@ void vSnakeTask(void *pvParameters) {
             break; // 退出循环
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100));     // 控制游戏速度
+        vTaskDelay(pdMS_TO_TICKS(150));     // 控制游戏速度
     }
 
     // 游戏结束后，等待一段时间，然后创建重启任务

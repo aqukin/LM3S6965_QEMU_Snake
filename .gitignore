@@ -1,5 +1,4 @@
 # 构建输出目录（CMake / Ninja）
-/build/
 /build-*/
 /cmake-build-*/
 

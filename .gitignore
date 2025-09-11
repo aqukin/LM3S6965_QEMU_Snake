@@ -1,2 +1,43 @@
-# 忽略 build 目录
+# 构建输出目录（CMake / Ninja）
 /build/
+/build-*/
+/cmake-build-*/
+
+# CMake 产生的缓存/文件（如果不在 build/ 里被捕获时）
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Ninja / 生成器中间文件
+*.ninja
+*.ninja_log
+*.ninja_deps
+
+# 编译数据库（如果需要版本控制，可删掉这一行）
+compile_commands.json
+
+
+# 对象与静态库
+*.o
+*.obj
+*.a
+*.lib
+
+# 依赖与临时文件
+*.d
+*.su
+*.tmp
+*.log
+
+# 追踪/调试相关
+*.svd
+
+# 编辑器/杂项
+.vscode/
+*.swp
+*.DS_Store
+
+# 如果将来需要保留某些生成文件，使用 ! 反选，例如：
+# !keep_this_generated_file.h

@@ -15,8 +15,6 @@ Makefile
 *.ninja_log
 *.ninja_deps
 
-# 编译数据库（如果需要版本控制，可删掉这一行）
-compile_commands.json
 
 
 # 对象与静态库

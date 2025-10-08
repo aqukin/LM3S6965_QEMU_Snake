@@ -15,8 +15,6 @@
 #include "uart.h"
 #include "grlib.h"
 #include "osram128x64x4.h"
-#include "pwm.h"
-#include "hw_pwm.h"
 
 /* OLED setup constants */
 #define SCREEN_WIDTH 128
@@ -31,7 +29,6 @@
 #define KEY_RIGHT 'd'
 #define KEY_R     'r'
 #define KEY_PAUSE 'p'         // 暂停键
-#define KEY_STATS 't'         // 统计信息键
 
 /* 数据结构 */
 typedef struct {
@@ -40,19 +37,29 @@ typedef struct {
 } Point;
 
 typedef enum {
-    DIR_UP, DIR_DOWN, DIR_LEFT, DIR_RIGHT, R, PAUSE, STATS
+    DIR_UP, DIR_DOWN, DIR_LEFT, DIR_RIGHT, R, PAUSE
 } Direction;
+
+typedef enum {
+    FOOD_NORMAL,    // 普通食物 - 绿色
+    FOOD_GOLDEN,    // 黄金食物 - 双倍分数，更亮
+    FOOD_SPEED_UP,  // 加速食物 - 临时提升速度
+    FOOD_SLOW,      // 减速食物 - 临时降低速度
+    FOOD_SUPER      // 超级食物 - 大量分数 + 长度增加2
+} FoodType;
 
 typedef struct {
     Point position;
+    FoodType type;
+    uint32_t spawnTime;    // 食物生成时间
+    uint32_t lifetime;     // 食物生存时间(毫秒)
 } Food;
 
 typedef enum {
     GAME_MENU,      // 游戏菜单状态
     GAME_PLAYING,   // 游戏进行状态
     GAME_PAUSED,    // 游戏暂停状态
-    GAME_OVER,      // 游戏结束状态
-    GAME_STATS      // 游戏统计状态
+    GAME_OVER       // 游戏结束状态
 } GameMode;
 
 typedef struct {
@@ -69,26 +76,18 @@ typedef struct {
     uint32_t highScore;         // 最高得分
     uint32_t level;             // 当前等级
     uint32_t gameTime;          // 游戏时间(秒)
+    uint32_t speedBoostEndTime; // 速度提升结束时间
+    uint32_t slowEffectEndTime; // 减速效果结束时间
     GameMode mode;              // 游戏模式
-    uint32_t frameCounter;      // 帧计数器，用于动画效果
-    uint32_t totalFoodsEaten;   // 总共吃掉的食物数量
-    uint32_t gamesPlayed;       // 总游戏次数
 } GameState_t;
 
 
 #define KEY_QUEUE_LENGTH 5
 #define KEY_QUEUE_ITEM_SIZE sizeof(KeyMsg)
-#define SOUND_QUEUE_LENGTH 10
-#define SOUND_QUEUE_ITEM_SIZE 8  // sizeof(SoundMsg)
 
 QueueHandle_t xKeyQueue;
-QueueHandle_t xSoundQueue;  // 音效队列
 // --- 用于保护游戏状态的互斥锁 ---
 SemaphoreHandle_t xGameStateMutex;
-
-// --- 模拟EEPROM存储的最高分数据 ---
-#define EEPROM_HIGH_SCORE_ADDR 0x1000
-static uint32_t s_storedHighScore = 0;  // 模拟存储的最高分
 
 void vRestart(void *pvParameters);
 void vDrawTask(void *pvParameters); 
@@ -112,112 +111,43 @@ void ( * vOLEDStringDraw )( const char *,
 static void prvPrintString( const char * pcString );
 
 /*-----------------------------------------------------------*/
-/* 模拟EEPROM数据存储函数 */
-void saveHighScore(uint32_t highScore) {
-    // 在真实硬件上，这里会写入EEPROM或Flash
-    // 这里我们只是保存到静态变量中模拟持久化存储
-    s_storedHighScore = highScore;
-    
-    // 如果有真实的EEPROM，可以使用类似以下的代码：
-    // EEPROMProgram(&highScore, EEPROM_HIGH_SCORE_ADDR, sizeof(uint32_t));
-}
-
-/*-----------------------------------------------------------*/
-/* PWM音效系统 */
-#define BUZZER_PWM_BASE PWM_BASE
-#define BUZZER_PWM_OUT PWM_OUT_0
-#define BUZZER_PWM_GEN PWM_GEN_0
-
-// 不同音效的频率定义
-#define SOUND_EAT_FOOD     1000   // 吃食物音效
-#define SOUND_GAME_OVER    300    // 游戏结束音效
-#define SOUND_LEVEL_UP     1800   // 升级音效
-
-void initBuzzer(void) {
-    // 启用PWM模块时钟
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM);
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
-    
-    // 配置PWM引脚 (PB6对应PWM0)
-    GPIOPinTypePWM(GPIO_PORTB_BASE, GPIO_PIN_6);
-    
-    // 设置PWM时钟分频器
-    SysCtlPWMClockSet(SYSCTL_PWMDIV_1);
-    
-    // 配置PWM发生器
-    PWMGenConfigure(BUZZER_PWM_BASE, BUZZER_PWM_GEN, PWM_GEN_MODE_UP_DOWN | PWM_GEN_MODE_NO_SYNC);
-    
-    // 初始状态下禁用PWM输出
-    PWMOutputState(BUZZER_PWM_BASE, BUZZER_PWM_OUT, false);
-}
-
-void playSound(uint32_t frequency, uint32_t duration_ms) {
-    if (frequency == 0) {
-        // 频率为0表示静音
-        PWMOutputState(BUZZER_PWM_BASE, BUZZER_PWM_OUT, false);
-        return;
-    }
-    
-    // 计算PWM周期和占空比
-    uint32_t systemClock = SysCtlClockGet();
-    uint32_t pwmPeriod = systemClock / frequency;
-    uint32_t pwmDuty = pwmPeriod / 2;  // 50%占空比
-    
-    // 设置PWM周期和占空比
-    PWMGenPeriodSet(BUZZER_PWM_BASE, BUZZER_PWM_GEN, pwmPeriod);
-    PWMPulseWidthSet(BUZZER_PWM_BASE, PWM_OUT_0, pwmDuty);
-    
-    // 启用PWM输出
-    PWMGenEnable(BUZZER_PWM_BASE, BUZZER_PWM_GEN);
-    PWMOutputState(BUZZER_PWM_BASE, BUZZER_PWM_OUT, true);
-    
-    // 在实际系统中，这里可能需要使用定时器来控制音效持续时间
-    // 这里我们简化处理，通过任务延迟来控制
-}
-uint32_t loadHighScore(void) {
-    // 在真实硬件上，这里会从EEPROM或Flash读取
-    // 这里我们从静态变量读取
-    
-    // 如果有真实的EEPROM，可以使用类似以下的代码：
-    // uint32_t highScore;
-    // EEPROMRead(&highScore, EEPROM_HIGH_SCORE_ADDR, sizeof(uint32_t));
-    // return highScore;
-    
-    return s_storedHighScore;
-}
-
-/*-----------------------------------------------------------*/
-/* 音效播放任务 */
-void vSoundTask(void *pvParameters) {
-    typedef struct {
-        uint32_t frequency;
-        uint32_t duration;
-    } SoundMsg;
-    
-    QueueHandle_t xSoundQueue = (QueueHandle_t)pvParameters;
-    SoundMsg soundMsg;
-    
-    for(;;) {
-        if (xQueueReceive(xSoundQueue, &soundMsg, portMAX_DELAY) == pdTRUE) {
-            playSound(soundMsg.frequency, soundMsg.duration);
-            vTaskDelay(pdMS_TO_TICKS(soundMsg.duration));
-            playSound(0, 0); // 停止音效
-        }
-    }
-}
-
-/*-----------------------------------------------------------*/
 /* 工具函数：随机生成食物 */
 void spawnFood() {
     // 注意：此函数应该在获取互斥锁后调用
     s_gameState.food.position.x = (rand() % (SCREEN_WIDTH / BLOCK_SIZE)) * BLOCK_SIZE;
     s_gameState.food.position.y = (rand() % (SCREEN_HEIGHT / BLOCK_SIZE)) * BLOCK_SIZE;
+    
+    // 根据概率生成不同类型的食物
+    uint32_t randomValue = rand() % 100;
+    if (randomValue < 60) {
+        s_gameState.food.type = FOOD_NORMAL;
+        s_gameState.food.lifetime = 0; // 普通食物不会过期
+    } else if (randomValue < 75) {
+        s_gameState.food.type = FOOD_GOLDEN;
+        s_gameState.food.lifetime = 8000; // 8秒后消失
+    } else if (randomValue < 85) {
+        s_gameState.food.type = FOOD_SPEED_UP;
+        s_gameState.food.lifetime = 6000; // 6秒后消失
+    } else if (randomValue < 95) {
+        s_gameState.food.type = FOOD_SLOW;
+        s_gameState.food.lifetime = 5000; // 5秒后消失
+    } else {
+        s_gameState.food.type = FOOD_SUPER;
+        s_gameState.food.lifetime = 10000; // 10秒后消失
+    }
+    
+    s_gameState.food.spawnTime = xTaskGetTickCount();
 }
 
 /*-----------------------------------------------------------*/
 /* 检查食物是否过期 */
 tBoolean isFoodExpired() {
-    return false; // 普通食物不会过期
+    if (s_gameState.food.lifetime == 0) return false; // 普通食物不会过期
+    
+    uint32_t currentTime = xTaskGetTickCount();
+    uint32_t elapsedTime = (currentTime - s_gameState.food.spawnTime) * portTICK_PERIOD_MS;
+    
+    return (elapsedTime >= s_gameState.food.lifetime);
 }
 
 /*-----------------------------------------------------------*/
@@ -242,42 +172,60 @@ void updateGameTime() {
 }
 
 /*-----------------------------------------------------------*/
-/* 播放音效的辅助函数 */
-void queueSound(uint32_t frequency, uint32_t duration) {
-    typedef struct {
-        uint32_t frequency;
-        uint32_t duration;
-    } SoundMsg;
+/* 处理不同类型食物的效果 */
+void processFoodEffect(FoodType foodType) {
+    uint32_t currentTime = xTaskGetTickCount();
     
-    SoundMsg msg = {frequency, duration};
-    xQueueSend(xSoundQueue, &msg, 0); // 不阻塞
-}
-
-/*-----------------------------------------------------------*/
-/* 处理食物效果 */
-void processFoodEffect() {
-    uint32_t oldLevel = s_gameState.level;
-    
-    // 增加食物统计
-    s_gameState.totalFoodsEaten++;
-    
-    // 普通食物：标准分数和长度增加
-    s_gameState.currentScore += calculateScore(s_gameState.snakeLength, s_gameState.level);
-    if(s_gameState.snakeLength < MAX_SNAKE_LENGTH) {
-        s_gameState.snakeLength++;
+    switch(foodType) {
+        case FOOD_NORMAL:
+            // 普通食物：标准分数和长度增加
+            s_gameState.currentScore += calculateScore(s_gameState.snakeLength, s_gameState.level);
+            if(s_gameState.snakeLength < MAX_SNAKE_LENGTH) {
+                s_gameState.snakeLength++;
+            }
+            break;
+            
+        case FOOD_GOLDEN:
+            // 黄金食物：双倍分数
+            s_gameState.currentScore += calculateScore(s_gameState.snakeLength, s_gameState.level) * 2;
+            if(s_gameState.snakeLength < MAX_SNAKE_LENGTH) {
+                s_gameState.snakeLength++;
+            }
+            break;
+            
+        case FOOD_SPEED_UP:
+            // 加速食物：正常分数 + 5秒速度提升
+            s_gameState.currentScore += calculateScore(s_gameState.snakeLength, s_gameState.level);
+            s_gameState.speedBoostEndTime = currentTime + pdMS_TO_TICKS(5000);
+            if(s_gameState.snakeLength < MAX_SNAKE_LENGTH) {
+                s_gameState.snakeLength++;
+            }
+            break;
+            
+        case FOOD_SLOW:
+            // 减速食物：正常分数 + 3秒减速效果
+            s_gameState.currentScore += calculateScore(s_gameState.snakeLength, s_gameState.level);
+            s_gameState.slowEffectEndTime = currentTime + pdMS_TO_TICKS(3000);
+            if(s_gameState.snakeLength < MAX_SNAKE_LENGTH) {
+                s_gameState.snakeLength++;
+            }
+            break;
+            
+        case FOOD_SUPER:
+            // 超级食物：三倍分数 + 增加2个长度
+            s_gameState.currentScore += calculateScore(s_gameState.snakeLength, s_gameState.level) * 3;
+            if(s_gameState.snakeLength < MAX_SNAKE_LENGTH - 1) {
+                s_gameState.snakeLength += 2;
+            } else if(s_gameState.snakeLength < MAX_SNAKE_LENGTH) {
+                s_gameState.snakeLength++;
+            }
+            break;
     }
-    queueSound(SOUND_EAT_FOOD, 100);  // 播放吃食物音效
     
     // 更新等级和最高分
     s_gameState.level = calculateLevel(s_gameState.currentScore);
     if (s_gameState.currentScore > s_gameState.highScore) {
         s_gameState.highScore = s_gameState.currentScore;
-        saveHighScore(s_gameState.highScore);  // 保存新的最高分
-    }
-    
-    // 检查是否升级
-    if (s_gameState.level > oldLevel) {
-        queueSound(SOUND_LEVEL_UP, 400);  // 播放升级音效
     }
 }
 
@@ -296,7 +244,6 @@ void vKeyboardTask(void *pvParameters) {
                 case KEY_RIGHT: msg.dir = DIR_RIGHT; break;
                 case KEY_R:     msg.dir = R; break;
                 case KEY_PAUSE: msg.dir = PAUSE; break;
-                case KEY_STATS: msg.dir = STATS; break;
                 default:        continue; // 非方向键忽略
             }
             xQueueSend(xKeyQueue, &msg, 0); // 发送方向消息
@@ -313,34 +260,9 @@ void displayGameMenu() {
     vOLEDStringDraw("P: Pause", 35, 35, 0x0F);
     vOLEDStringDraw("R: Start/Restart", 5, 45, 0x0F);
     
-    char infoBuffer[32];
-    sprintf(infoBuffer, "High: %lu", s_gameState.highScore);
-    vOLEDStringDraw(infoBuffer, 25, 55, 0x0F);
-}
-
-/*-----------------------------------------------------------*/
-/* 显示游戏统计信息 */
-void displayGameStats() {
-    char statsBuffer[32];
-    
-    vOLEDStringDraw("GAME STATS", 25, 5, 0x0F);
-    
-    sprintf(statsBuffer, "Games: %lu", s_gameState.gamesPlayed);
-    vOLEDStringDraw(statsBuffer, 10, 15, 0x0F);
-    
-    sprintf(statsBuffer, "Foods: %lu", s_gameState.totalFoodsEaten);
-    vOLEDStringDraw(statsBuffer, 10, 25, 0x0F);
-    
-    sprintf(statsBuffer, "High: %lu", s_gameState.highScore);
-    vOLEDStringDraw(statsBuffer, 10, 35, 0x0F);
-    
-    // 计算平均分
-    uint32_t avgScore = s_gameState.gamesPlayed > 0 ? 
-                       (s_gameState.totalFoodsEaten * 10) / s_gameState.gamesPlayed : 0;
-    sprintf(statsBuffer, "Avg: %lu", avgScore);
-    vOLEDStringDraw(statsBuffer, 10, 45, 0x0F);
-    
-    vOLEDStringDraw("Press R", 30, 55, 0x0F);
+    char highScoreBuffer[32];
+    sprintf(highScoreBuffer, "High: %lu", s_gameState.highScore);
+    vOLEDStringDraw(highScoreBuffer, 25, 55, 0x0F);
 }
 
 /*-----------------------------------------------------------*/
@@ -370,18 +292,41 @@ void vDrawTask(void *pvParameters) {
                 displayGameMenu();
                 break;
                 
-            case GAME_STATS:
-                displayGameStats();
-                break;
-                
             case GAME_PLAYING:
                 // 绘制蛇
                 for(int i = 0; i < localGameState.snakeLength; i++) {
                     vOLEDBlockDraw(localGameState.snake[i].x, localGameState.snake[i].y, BLOCK_SIZE, BLOCK_SIZE);
                 }
                 
-            // 绘制食物 - 简单的方块显示
-            vOLEDBlockDraw(localGameState.food.position.x, localGameState.food.position.y, BLOCK_SIZE, BLOCK_SIZE);                // 显示游戏信息
+                // 绘制食物 - 根据类型使用不同显示方式
+                switch(localGameState.food.type) {
+                    case FOOD_NORMAL:
+                        // 普通食物 - 单个方块
+                        vOLEDBlockDraw(localGameState.food.position.x, localGameState.food.position.y, BLOCK_SIZE, BLOCK_SIZE);
+                        break;
+                    case FOOD_GOLDEN:
+                        // 黄金食物 - 稍大一点
+                        vOLEDBlockDraw(localGameState.food.position.x, localGameState.food.position.y, BLOCK_SIZE, BLOCK_SIZE);
+                        vOLEDBlockDraw(localGameState.food.position.x+1, localGameState.food.position.y+1, BLOCK_SIZE-2, BLOCK_SIZE-2);
+                        break;
+                    case FOOD_SPEED_UP:
+                        // 加速食物 - 绘制一个小箭头样式
+                        vOLEDBlockDraw(localGameState.food.position.x, localGameState.food.position.y, BLOCK_SIZE, BLOCK_SIZE);
+                        if (localGameState.food.position.x + BLOCK_SIZE < SCREEN_WIDTH) {
+                            vOLEDBlockDraw(localGameState.food.position.x+BLOCK_SIZE, localGameState.food.position.y, BLOCK_SIZE/2, BLOCK_SIZE);
+                        }
+                        break;
+                    case FOOD_SLOW:
+                        // 减速食物 - 绘制一个点状
+                        vOLEDBlockDraw(localGameState.food.position.x+BLOCK_SIZE/4, localGameState.food.position.y+BLOCK_SIZE/4, BLOCK_SIZE/2, BLOCK_SIZE/2);
+                        break;
+                    case FOOD_SUPER:
+                        // 超级食物 - 绘制一个大的方块
+                        vOLEDBlockDraw(localGameState.food.position.x, localGameState.food.position.y, BLOCK_SIZE*2, BLOCK_SIZE*2);
+                        break;
+                }
+                
+                // 显示游戏信息
                 sprintf(scoreBuffer, "Score:%lu L:%lu", localGameState.currentScore, localGameState.level);
                 vOLEDStringDraw(scoreBuffer, 0, 0, 0x0F);
                 
@@ -407,12 +352,6 @@ void vDrawTask(void *pvParameters) {
                 vOLEDStringDraw(timeBuffer, 20, 50, 0x0F);
                 break;
         }
-        
-        // 更新帧计数器用于动画
-        if (xSemaphoreTake(xGameStateMutex, 0) == pdTRUE) {
-            s_gameState.frameCounter++;
-            xSemaphoreGive(xGameStateMutex);
-        }
 
         vTaskDelay(pdMS_TO_TICKS(50)); // 绘图任务不需要太高的刷新率
     }
@@ -430,11 +369,9 @@ void vSnakeTask(void *pvParameters) {
         s_gameState.level = 1;          // 初始等级
         s_gameState.gameTime = 0;       // 初始化游戏时间
         s_gameStartTime = xTaskGetTickCount(); // 记录游戏开始时间
+        s_gameState.speedBoostEndTime = 0;     // 初始化速度提升结束时间
+        s_gameState.slowEffectEndTime = 0;     // 初始化减速效果结束时间
         s_gameState.mode = GAME_MENU;          // 开始时显示菜单
-        s_gameState.highScore = loadHighScore(); // 从存储加载最高分
-        s_gameState.frameCounter = 0;          // 初始化帧计数器
-        s_gameState.totalFoodsEaten = 0;       // 初始化食物统计
-        s_gameState.gamesPlayed = 0;           // 初始化游戏次数
 
         spawnFood();
 
@@ -458,14 +395,6 @@ void vSnakeTask(void *pvParameters) {
                         if (msg.dir == R) {
                             s_gameState.mode = GAME_PLAYING;
                             s_gameStartTime = xTaskGetTickCount();
-                        } else if (msg.dir == STATS) {
-                            s_gameState.mode = GAME_STATS;
-                        }
-                        break;
-                        
-                    case GAME_STATS:
-                        if (msg.dir == R) {
-                            s_gameState.mode = GAME_MENU;
                         }
                         break;
                         
@@ -493,11 +422,7 @@ void vSnakeTask(void *pvParameters) {
                         
                     case GAME_OVER:
                         if (msg.dir == R) {
-                            // 重新开始时增加游戏次数
-                            s_gameState.gamesPlayed++;
                             s_gameState.mode = GAME_MENU;
-                        } else if (msg.dir == STATS) {
-                            s_gameState.mode = GAME_STATS;
                         }
                         break;
                 }
@@ -526,7 +451,6 @@ void vSnakeTask(void *pvParameters) {
                 if(newHead.x < 0 || newHead.x >= SCREEN_WIDTH || newHead.y < 0 || newHead.y >= SCREEN_HEIGHT) {
                     s_gameState.gameOver = true;
                     s_gameState.mode = GAME_OVER;
-                    queueSound(SOUND_GAME_OVER, 500);  // 播放游戏结束音效
                 }
 
                 // 撞自己检测
@@ -535,7 +459,6 @@ void vSnakeTask(void *pvParameters) {
                         if (s_gameState.snake[i].x == newHead.x && s_gameState.snake[i].y == newHead.y) {
                             s_gameState.gameOver = true;
                             s_gameState.mode = GAME_OVER;
-                            queueSound(SOUND_GAME_OVER, 500);  // 播放游戏结束音效
                         }
                     }
                 }
@@ -543,8 +466,8 @@ void vSnakeTask(void *pvParameters) {
                 if (!s_gameState.gameOver) {
                     // 1. 检查是否吃到食物
                     if(newHead.x == s_gameState.food.position.x && newHead.y == s_gameState.food.position.y) {
-                        // 处理食物效果
-                        processFoodEffect();
+                        // 处理不同类型食物的效果
+                        processFoodEffect(s_gameState.food.type);
                         
                         spawnFood(); // 生成新食物
                     }
@@ -565,11 +488,22 @@ void vSnakeTask(void *pvParameters) {
         // 根据游戏模式决定延迟时间
         uint32_t taskDelay = 100;
         if (s_gameState.mode == GAME_PLAYING && !s_gameState.gameOver) {
-            // 根据等级调整游戏速度
+            // 根据等级和特殊效果调整游戏速度
+            uint32_t currentTime = xTaskGetTickCount();
             uint32_t baseDelay = 200 - (s_gameState.level - 1) * 15;
             if (baseDelay < 50) baseDelay = 50;  // 最快不超过50ms
             
             taskDelay = baseDelay;
+            
+            // 检查速度提升效果
+            if (s_gameState.speedBoostEndTime > currentTime) {
+                taskDelay = taskDelay / 2;  // 速度提升时延迟减半
+            }
+            
+            // 检查减速效果
+            if (s_gameState.slowEffectEndTime > currentTime) {
+                taskDelay = taskDelay * 2;  // 减速时延迟加倍
+            }
         }
         
         vTaskDelay(pdMS_TO_TICKS(taskDelay));
@@ -587,9 +521,6 @@ void prvSetupHardware(void) {
     SysCtlClockSet(SYSCTL_SYSDIV_4 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN | SYSCTL_XTAL_8MHZ);
     SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
     UARTEnable(UART0_BASE);
-    
-    // 初始化蜂鸣器PWM
-    initBuzzer();
 }
 
 /*-----------------------------------------------------------*/
@@ -599,14 +530,12 @@ int main(void) {
     // --- 创建互斥锁和队列 ---
     xGameStateMutex = xSemaphoreCreateMutex();
     xKeyQueue = xQueueCreate(KEY_QUEUE_LENGTH, KEY_QUEUE_ITEM_SIZE);
-    xSoundQueue = xQueueCreate(SOUND_QUEUE_LENGTH, SOUND_QUEUE_ITEM_SIZE);
 
-    if (xGameStateMutex != NULL && xKeyQueue != NULL && xSoundQueue != NULL) {
+    if (xGameStateMutex != NULL && xKeyQueue != NULL) {
         // --- 创建任务 ---
         xTaskCreate(vSnakeTask, "Snake", configMINIMAL_STACK_SIZE , NULL, 2, NULL);
         xTaskCreate(vDrawTask, "Draw", 1024, NULL, 1, NULL); // 绘图任务优先级可以低一些
         xTaskCreate(vKeyboardTask, "Keyboard", configMINIMAL_STACK_SIZE , NULL, 3, NULL);
-        xTaskCreate(vSoundTask, "Sound", configMINIMAL_STACK_SIZE, (void*)xSoundQueue, 1, NULL);
 
         vTaskStartScheduler();
     }

@@ -15,8 +15,6 @@
 #include "uart.h"
 #include "grlib.h"
 #include "osram128x64x4.h"
-#include "pwm.h"
-#include "hw_pwm.h"
 
 /* OLED setup constants */
 #define SCREEN_WIDTH 128
@@ -78,11 +76,8 @@ typedef struct {
 
 #define KEY_QUEUE_LENGTH 5
 #define KEY_QUEUE_ITEM_SIZE sizeof(KeyMsg)
-#define SOUND_QUEUE_LENGTH 10
-#define SOUND_QUEUE_ITEM_SIZE 8  // sizeof(SoundMsg)
 
 QueueHandle_t xKeyQueue;
-QueueHandle_t xSoundQueue;  // 音效队列
 // --- 用于保护游戏状态的互斥锁 ---
 SemaphoreHandle_t xGameStateMutex;
 
@@ -122,58 +117,6 @@ void saveHighScore(uint32_t highScore) {
     // EEPROMProgram(&highScore, EEPROM_HIGH_SCORE_ADDR, sizeof(uint32_t));
 }
 
-/*-----------------------------------------------------------*/
-/* PWM音效系统 */
-#define BUZZER_PWM_BASE PWM_BASE
-#define BUZZER_PWM_OUT PWM_OUT_0
-#define BUZZER_PWM_GEN PWM_GEN_0
-
-// 不同音效的频率定义
-#define SOUND_EAT_FOOD     1000   // 吃食物音效
-#define SOUND_GAME_OVER    300    // 游戏结束音效
-#define SOUND_LEVEL_UP     1800   // 升级音效
-
-void initBuzzer(void) {
-    // 启用PWM模块时钟
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM);
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
-    
-    // 配置PWM引脚 (PB6对应PWM0)
-    GPIOPinTypePWM(GPIO_PORTB_BASE, GPIO_PIN_6);
-    
-    // 设置PWM时钟分频器
-    SysCtlPWMClockSet(SYSCTL_PWMDIV_1);
-    
-    // 配置PWM发生器
-    PWMGenConfigure(BUZZER_PWM_BASE, BUZZER_PWM_GEN, PWM_GEN_MODE_UP_DOWN | PWM_GEN_MODE_NO_SYNC);
-    
-    // 初始状态下禁用PWM输出
-    PWMOutputState(BUZZER_PWM_BASE, BUZZER_PWM_OUT, false);
-}
-
-void playSound(uint32_t frequency, uint32_t duration_ms) {
-    if (frequency == 0) {
-        // 频率为0表示静音
-        PWMOutputState(BUZZER_PWM_BASE, BUZZER_PWM_OUT, false);
-        return;
-    }
-    
-    // 计算PWM周期和占空比
-    uint32_t systemClock = SysCtlClockGet();
-    uint32_t pwmPeriod = systemClock / frequency;
-    uint32_t pwmDuty = pwmPeriod / 2;  // 50%占空比
-    
-    // 设置PWM周期和占空比
-    PWMGenPeriodSet(BUZZER_PWM_BASE, BUZZER_PWM_GEN, pwmPeriod);
-    PWMPulseWidthSet(BUZZER_PWM_BASE, PWM_OUT_0, pwmDuty);
-    
-    // 启用PWM输出
-    PWMGenEnable(BUZZER_PWM_BASE, BUZZER_PWM_GEN);
-    PWMOutputState(BUZZER_PWM_BASE, BUZZER_PWM_OUT, true);
-    
-    // 在实际系统中，这里可能需要使用定时器来控制音效持续时间
-    // 这里我们简化处理，通过任务延迟来控制
-}
 uint32_t loadHighScore(void) {
     // 在真实硬件上，这里会从EEPROM或Flash读取
     // 这里我们从静态变量读取
@@ -184,26 +127,6 @@ uint32_t loadHighScore(void) {
     // return highScore;
     
     return s_storedHighScore;
-}
-
-/*-----------------------------------------------------------*/
-/* 音效播放任务 */
-void vSoundTask(void *pvParameters) {
-    // typedef struct {
-    //     uint32_t frequency;
-    //     uint32_t duration;
-    // } SoundMsg;
-    
-    // QueueHandle_t xSoundQueue = (QueueHandle_t)pvParameters;
-    // SoundMsg soundMsg;
-    
-    // for(;;) {
-    //     if (xQueueReceive(xSoundQueue, &soundMsg, portMAX_DELAY) == pdTRUE) {
-    //         playSound(soundMsg.frequency, soundMsg.duration);
-    //         vTaskDelay(pdMS_TO_TICKS(soundMsg.duration));
-    //         playSound(0, 0); // 停止音效
-    //     }
-    // }
 }
 
 /*-----------------------------------------------------------*/
@@ -242,18 +165,6 @@ void updateGameTime() {
 }
 
 /*-----------------------------------------------------------*/
-/* 播放音效的辅助函数 */
-void queueSound(uint32_t frequency, uint32_t duration) {
-    typedef struct {
-        uint32_t frequency;
-        uint32_t duration;
-    } SoundMsg;
-    
-    SoundMsg msg = {frequency, duration};
-    xQueueSend(xSoundQueue, &msg, 0); // 不阻塞
-}
-
-/*-----------------------------------------------------------*/
 /* 处理食物效果 */
 void processFoodEffect() {
     uint32_t oldLevel = s_gameState.level;
@@ -266,7 +177,6 @@ void processFoodEffect() {
     if(s_gameState.snakeLength < MAX_SNAKE_LENGTH) {
         s_gameState.snakeLength++;
     }
-    queueSound(SOUND_EAT_FOOD, 100);  // 播放吃食物音效
     
     // 更新等级和最高分
     s_gameState.level = calculateLevel(s_gameState.currentScore);
@@ -277,7 +187,7 @@ void processFoodEffect() {
     
     // 检查是否升级
     if (s_gameState.level > oldLevel) {
-        queueSound(SOUND_LEVEL_UP, 400);  // 播放升级音效
+        // 升级了，但不播放音效
     }
 }
 
@@ -526,7 +436,6 @@ void vSnakeTask(void *pvParameters) {
                 if(newHead.x < 0 || newHead.x >= SCREEN_WIDTH || newHead.y < 0 || newHead.y >= SCREEN_HEIGHT) {
                     s_gameState.gameOver = true;
                     s_gameState.mode = GAME_OVER;
-                    queueSound(SOUND_GAME_OVER, 500);  // 播放游戏结束音效
                 }
 
                 // 撞自己检测
@@ -535,7 +444,6 @@ void vSnakeTask(void *pvParameters) {
                         if (s_gameState.snake[i].x == newHead.x && s_gameState.snake[i].y == newHead.y) {
                             s_gameState.gameOver = true;
                             s_gameState.mode = GAME_OVER;
-                            queueSound(SOUND_GAME_OVER, 500);  // 播放游戏结束音效
                         }
                     }
                 }
@@ -587,9 +495,6 @@ void prvSetupHardware(void) {
     SysCtlClockSet(SYSCTL_SYSDIV_4 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN | SYSCTL_XTAL_8MHZ);
     SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
     UARTEnable(UART0_BASE);
-    
-    // 初始化蜂鸣器PWM
-    initBuzzer();
 }
 
 /*-----------------------------------------------------------*/
@@ -599,14 +504,12 @@ int main(void) {
     // --- 创建互斥锁和队列 ---
     xGameStateMutex = xSemaphoreCreateMutex();
     xKeyQueue = xQueueCreate(KEY_QUEUE_LENGTH, KEY_QUEUE_ITEM_SIZE);
-    xSoundQueue = xQueueCreate(SOUND_QUEUE_LENGTH, SOUND_QUEUE_ITEM_SIZE);
 
-    if (xGameStateMutex != NULL && xKeyQueue != NULL && xSoundQueue != NULL) {
+    if (xGameStateMutex != NULL && xKeyQueue != NULL) {
         // --- 创建任务 ---
         xTaskCreate(vSnakeTask, "Snake", configMINIMAL_STACK_SIZE , NULL, 2, NULL);
         xTaskCreate(vDrawTask, "Draw", 1024, NULL, 1, NULL); // 绘图任务优先级可以低一些
         xTaskCreate(vKeyboardTask, "Keyboard", configMINIMAL_STACK_SIZE , NULL, 3, NULL);
-        xTaskCreate(vSoundTask, "Sound", configMINIMAL_STACK_SIZE, (void*)xSoundQueue, 1, NULL);
 
         vTaskStartScheduler();
     }

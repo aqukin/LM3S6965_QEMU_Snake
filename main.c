@@ -189,21 +189,21 @@ uint32_t loadHighScore(void) {
 /*-----------------------------------------------------------*/
 /* 音效播放任务 */
 void vSoundTask(void *pvParameters) {
-    typedef struct {
-        uint32_t frequency;
-        uint32_t duration;
-    } SoundMsg;
+    // typedef struct {
+    //     uint32_t frequency;
+    //     uint32_t duration;
+    // } SoundMsg;
     
-    QueueHandle_t xSoundQueue = (QueueHandle_t)pvParameters;
-    SoundMsg soundMsg;
+    // QueueHandle_t xSoundQueue = (QueueHandle_t)pvParameters;
+    // SoundMsg soundMsg;
     
-    for(;;) {
-        if (xQueueReceive(xSoundQueue, &soundMsg, portMAX_DELAY) == pdTRUE) {
-            playSound(soundMsg.frequency, soundMsg.duration);
-            vTaskDelay(pdMS_TO_TICKS(soundMsg.duration));
-            playSound(0, 0); // 停止音效
-        }
-    }
+    // for(;;) {
+    //     if (xQueueReceive(xSoundQueue, &soundMsg, portMAX_DELAY) == pdTRUE) {
+    //         playSound(soundMsg.frequency, soundMsg.duration);
+    //         vTaskDelay(pdMS_TO_TICKS(soundMsg.duration));
+    //         playSound(0, 0); // 停止音效
+    //     }
+    // }
 }
 
 /*-----------------------------------------------------------*/
